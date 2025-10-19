@@ -1,0 +1,13 @@
+venv/
+./venv/*
+venv/*
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.idea/
+.vscode/
+fish_images/*
+!fish_images/.gitkeep
+logs/
+*.log
