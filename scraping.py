@@ -1523,7 +1523,7 @@ def batch_mode():
     
     print("\nPilih fish database:")
     print("1. Top 50 Species (Recommended for testing)")
-    print("2. All 1642 Species (Complete database)")
+    print("2. All 1437 Species (Complete database)")
     
     while True:
         choice = input("Pilihan (1-2): ").strip()
