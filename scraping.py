@@ -206,23 +206,19 @@ class FishImageScraper:
             logger.error(f"Download failed for {url}: {e}")
             return False
     
-    def scrape_google_images(self):
-        """Scrape images from Google Images using Selenium"""
-        logger.info("Scraping Google Images...")
-        
+    def get_driver(self):
+        """Get WebDriver with fallback options for multiple browsers"""
         # Try Safari first (built-in macOS, no security issues)
-        driver = None
-        
-        # Option 1: Try Safari WebDriver (safest for macOS)
         try:
             from selenium import webdriver
             safari_options = webdriver.SafariOptions()
             driver = webdriver.Safari(options=safari_options)
             logger.info("Using Safari WebDriver (most secure)")
+            return driver
         except Exception as safari_error:
             logger.warning(f"Safari WebDriver not available: {safari_error}")
             
-            # Option 2: Try Firefox with geckodriver
+            # Try Firefox with geckodriver
             try:
                 from selenium.webdriver.firefox.options import Options as FirefoxOptions
                 from selenium.webdriver.firefox.service import Service as FirefoxService
@@ -236,10 +232,11 @@ class FishImageScraper:
                 firefox_service = FirefoxService(GeckoDriverManager().install())
                 driver = webdriver.Firefox(service=firefox_service, options=firefox_options)
                 logger.info("Using Firefox WebDriver")
+                return driver
             except Exception as firefox_error:
                 logger.warning(f"Firefox WebDriver not available: {firefox_error}")
                 
-                # Option 3: Chrome with additional security options
+                # Chrome with additional security options
                 try:
                     chrome_options = Options()
                     chrome_options.add_argument('--headless')
@@ -252,90 +249,230 @@ class FishImageScraper:
                     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
                     chrome_options.add_experimental_option('useAutomationExtension', False)
                     
-                    # Use ChromeDriverManager without cache_valid_range (deprecated parameter)
                     service = Service(ChromeDriverManager().install())
                     driver = webdriver.Chrome(service=service, options=chrome_options)
                     logger.info("Using Chrome WebDriver with enhanced security")
+                    
+                    # Hide webdriver property
+                    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    return driver
                 except Exception as chrome_error:
                     logger.error(f"All WebDriver options failed. Chrome error: {chrome_error}")
-                    return
+                    return None
+
+    def extract_original_url_from_google(self, driver, img_element):
+        """Extract original image URL from Google Images by clicking and inspecting preview"""
+        try:
+            # Scroll to image and click
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", img_element)
+            time.sleep(1)
+            driver.execute_script("arguments[0].click();", img_element)
+            time.sleep(3)
+            
+            # Look for the large preview image with different strategies
+            original_url = None
+            
+            # Strategy 1: Check for data-iurl (most reliable)
+            try:
+                large_img = driver.find_element(By.CSS_SELECTOR, "img[data-iurl]")
+                original_url = large_img.get_attribute('data-iurl')
+                if original_url and not any(skip in original_url for skip in ['encrypted-tbn', 'gstatic', 'googleusercontent']):
+                    return original_url
+            except:
+                pass
+            
+            # Strategy 2: Look for external domain URLs in src
+            try:
+                preview_imgs = driver.find_elements(By.CSS_SELECTOR, ".irc_mi img, .v4dQwb img, .iPVvYb img")
+                for img in preview_imgs:
+                    src_url = img.get_attribute('src')
+                    if src_url and src_url.startswith('http') and not any(skip in src_url for skip in ['encrypted-tbn', 'gstatic', 'google']):
+                        return src_url
+            except:
+                pass
+            
+            # Strategy 3: Check page metadata
+            try:
+                # Look for the "View image" link which contains original URL
+                view_image_link = driver.find_element(By.XPATH, "//a[contains(text(), 'View image') or contains(@href, '/imgres?')]")
+                href = view_image_link.get_attribute('href')
+                if href:
+                    import urllib.parse
+                    parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                    if 'imgurl' in parsed:
+                        return parsed['imgurl'][0]
+            except:
+                pass
+            
+            # Strategy 4: Look in image context menu or page source
+            try:
+                # Execute JavaScript to find image context
+                original_url = driver.execute_script("""
+                    var imgs = document.querySelectorAll('img');
+                    for (var i = 0; i < imgs.length; i++) {
+                        var src = imgs[i].src;
+                        if (src && src.indexOf('http') === 0 && 
+                            src.indexOf('encrypted-tbn') === -1 && 
+                            src.indexOf('gstatic') === -1 &&
+                            src.indexOf('google') === -1) {
+                            return src;
+                        }
+                    }
+                    return null;
+                """)
+                if original_url:
+                    return original_url
+            except:
+                pass
+                
+            return None
+            
+        except Exception as e:
+            return None
+        finally:
+            # Always try to close the preview
+            try:
+                close_btn = driver.find_element(By.CSS_SELECTOR, "[aria-label*='Close'], .irc_cb, [title*='Close']")
+                driver.execute_script("arguments[0].click();", close_btn)
+            except:
+                try:
+                    # Press ESC key as fallback
+                    driver.find_element(By.TAG_NAME, 'body').send_keys('\ue00c')
+                except:
+                    pass
+
+    def get_larger_google_image_url(self, img_url):
+        """Try to get larger version of Google Images URL - legacy fallback"""
+        try:
+            # Skip encrypted thumbnails entirely - they can't be enlarged
+            if 'encrypted-tbn' in img_url or 'gstatic.com' in img_url:
+                return None
+            
+            # For regular URLs, try to increase size parameters
+            if '=w' in img_url and '=h' in img_url:
+                import re
+                img_url = re.sub(r'=w\d+', '=w1200', img_url)
+                img_url = re.sub(r'=h\d+', '=h800', img_url)
+            elif 's=' in img_url:
+                img_url = re.sub(r's=\d+', 's=1200', img_url)
+            elif any(size in img_url for size in ['150x150', '200x200', '300x300']):
+                img_url = img_url.replace('150x150', '1200x800')
+                img_url = img_url.replace('200x200', '1200x800')  
+                img_url = img_url.replace('300x300', '1200x800')
+            
+            return img_url
+        except:
+            return img_url
+    
+    def scrape_google_images(self):
+        """Scrape images from Google Images by extracting URLs from page source"""
+        logger.info("Scraping Google Images...")
         
+        driver = self.get_driver()
         if not driver:
-            logger.error("No WebDriver available. Skipping Google Images.")
             return
         
         try:
-            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            # Use only the Latin name - no additional keywords
-            if not self.current_search_term:
-                logger.error("No Latin name available for Google Images search")
-                return
+            # Use enhanced search URL with quality filters  
+            search_query = self.latin_name if self.latin_name else self.current_search_term
+            # Multiple filters: large size, color images, JPEG format, photos only
+            url = f"https://www.google.com/search?q={search_query}&tbm=isch&tbs=isz:l,ic:color,ift:jpg,itp:photo"
             
-            search_query = self.current_search_term
-            url = f"https://www.google.com/search?q={search_query}&tbm=isch"
-            
-            logger.info(f"🔍 Google Images search query (Latin only): {search_query}")
+            logger.info(f"🔍 Google Images search query (Large + Color + Photo): {search_query}")
             
             driver.get(url)
-            time.sleep(2)
+            time.sleep(4)
             
-            # Scroll and load more images
-            last_height = driver.execute_script("return document.body.scrollHeight")
-            images_collected = 0
-            
-            while not self.is_target_reached() and images_collected < self.min_images * 3:
-                # Scroll down
+            # Scroll to load more images  
+            for i in range(5):
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(2)
-                
-                # Try to click "Show more results" button
-                try:
-                    show_more = driver.find_element(By.CSS_SELECTOR, "input[value='Show more results']")
-                    driver.execute_script("arguments[0].click();", show_more)
-                    time.sleep(3)
-                except:
-                    pass
-                
-                # Get image elements with better selectors
-                images = driver.find_elements(By.CSS_SELECTOR, "img")
-                
-                for img in images:
-                    if self.is_target_reached():
-                        break
-                    
-                    # Try multiple attributes to get image URL
-                    img_url = (img.get_attribute('data-src') or 
-                              img.get_attribute('src') or 
-                              img.get_attribute('data-original') or
-                              img.get_attribute('data-lazy-src'))
-                    
-                    if img_url and img_url.startswith('http') and self.is_valid_image_url(img_url):
-                        # Skip small images (likely thumbnails)
-                        try:
-                            width = int(img.get_attribute('width') or 0)
-                            height = int(img.get_attribute('height') or 0)
-                            if width < 200 or height < 200:
-                                continue
-                        except:
-                            pass
-                        
-                        logger.info(f"Attempting to download: {img_url}")
-                        if self.download_image(img_url, f"google_{images_collected}.jpg"):
-                            images_collected += 1
-                        time.sleep(random.uniform(1, 2))
-                
-                new_height = driver.execute_script("return document.body.scrollHeight")
-                if new_height == last_height:
-                    break
-                last_height = new_height
-                
-        except Exception as e:
-            logger.error(f"Google Images scraping failed: {e}")
-        finally:
+                time.sleep(3)
+                logger.debug(f"Scrolled {i+1} times")
+            
+            images_collected = 0
+            processed_urls = set()
+            
+            # Extract URLs directly from page source (much more reliable!)
+            logger.info("Extracting image URLs from page source...")
+            page_source = driver.page_source
+            
+            # Multiple regex patterns to find external image URLs
+            import re
+            import urllib.parse
+            
+            url_patterns = [
+                r'"(https?://[^"]+\.(?:jpg|jpeg|png|webp))"',  # Direct image URLs in quotes
+                r'imgurl=([^&"]+)',  # imgurl parameters
+                r'"ou":"([^"]+)"',   # ou (original URL) in JSON
+                r'"murl":"([^"]+)"'  # murl in JSON metadata
+            ]
+            
+            external_urls = set()
+            for pattern in url_patterns:
+                matches = re.findall(pattern, page_source)
+                for match in matches:
+                    # Decode URL if needed
+                    try:
+                        decoded_url = urllib.parse.unquote(match)
+                        if (decoded_url.startswith('http') and 
+                            any(ext in decoded_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp'])):
+                            
+                            # Skip Google hosted images
+                            if not any(skip in decoded_url for skip in [
+                                'encrypted-tbn', 'gstatic', 'googleusercontent', 
+                                'google.com', 'ggpht', 'blogger.googleusercontent'
+                            ]):
+                                external_urls.add(decoded_url)
+                    except:
+                        continue
+            
+            # Also check script tags for JSON data
             try:
-                driver.quit()
+                script_elements = driver.find_elements(By.TAG_NAME, "script")
+                for script in script_elements:
+                    script_content = script.get_attribute('innerHTML')
+                    if script_content:
+                        # Find JSON-like patterns containing image URLs
+                        json_matches = re.findall(r'\["([^"]+\.(?:jpg|jpeg|png|webp))"', script_content)
+                        for match in json_matches:
+                            if (match.startswith('http') and 
+                                not any(skip in match for skip in ['encrypted-tbn', 'gstatic', 'google'])):
+                                external_urls.add(match)
             except:
                 pass
+            
+            logger.info(f"Found {len(external_urls)} external image URLs")
+            
+            # Download images from extracted URLs
+            for i, img_url in enumerate(external_urls):
+                if images_collected >= self.min_images:
+                    break
+                    
+                if img_url not in processed_urls:
+                    # Validate URL before downloading
+                    if self.is_valid_image_url(img_url):
+                        logger.info(f"Trying Google image [{i+1}]: {img_url[:80]}...")
+                        
+                        if self.download_image(img_url, f"google_{images_collected}.jpg"):
+                            images_collected += 1
+                            processed_urls.add(img_url)
+                            logger.info(f"✅ Downloaded image {images_collected}")
+                        else:
+                            logger.debug(f"❌ Failed to download: {img_url[:50]}...")
+                    else:
+                        logger.debug(f"Invalid URL: {img_url[:50]}...")
+                
+                # Small delay to be respectful
+                time.sleep(random.uniform(0.5, 1.5))
+            
+            logger.info(f"Google Images: {images_collected}/{self.min_images} images collected")
+            self.downloaded_count += images_collected
+            
+        except Exception as e:
+            logger.error(f"Error in Google Images scraping: {e}")
+        finally:
+            if driver:
+                driver.quit()
     
     def scrape_bing_images(self):
         """Scrape images from Bing Images with improved selectors"""
@@ -1108,15 +1245,16 @@ class FishImageScraper:
         # Try different sources until we get enough images - prioritizing non-Wikipedia sources
         scrapers = [
             # self.scrape_unsplash,            # Free stock photos (good quality) ✅
+            self.scrape_wikimedia,           # Wikimedia Commons
+            self.scrape_wikipedia_images,    # Wikipedia articles (fixed parameter)
             self.scrape_bing_images,         # Bing images (improved) ✅
+            self.scrape_google_images,       # Google images (improved)
             # self.scrape_pexels_images,       # Pexels stock photos
             # self.scrape_pixabay_images,      # Pixabay stock photos
             self.scrape_flickr_images,       # Flickr photos (high quality)
             # self.scrape_simple_images,       # Alternative search engines
-            self.scrape_google_images,       # Google images (as fallback)
             self.scrape_fishbase,            # Fish-specific database
-            self.scrape_wikimedia,           # Wikimedia Commons
-            lambda: self.scrape_wikipedia_images(self.scientific_name),    # Wikipedia articles (last resort)
+            
         ]
         
         for scraper in scrapers:
@@ -1148,9 +1286,10 @@ class FishImageScraper:
 class BatchFishScraper:
     """Batch scraper untuk scraping multiple species dari CSV file"""
     
-    def __init__(self, csv_file, output_base_dir="fish_images"):
+    def __init__(self, csv_file, output_base_dir="fish_images", images_per_species=10):
         self.csv_file = csv_file
         self.output_base_dir = output_base_dir
+        self.images_per_species = images_per_species
         self.results = []
         
     def load_fish_list(self):
@@ -1167,11 +1306,19 @@ class BatchFishScraper:
         """Scrape single species dengan retry mechanism menggunakan nama Latin sebagai prioritas"""
         species_name = row['species_indonesia']
         # Get scientific names from CSV (nama_latin field)
+        # Field nama_latin now contains multiple latin names separated by ' ; '
         nama_latin_field = row.get('nama_latin') or ''
-        # Some records may contain multiple latin names separated by ';' or ','
-        latin_names = [ln.strip() for part in str(nama_latin_field).split(';') for ln in part.split(',') if ln.strip()]
+        # Split by ' ; ' first (new format), then by ';' and ',' for backward compatibility
+        latin_names = []
+        if ' ; ' in nama_latin_field:
+            # New format with ' ; ' separator
+            latin_names = [ln.strip() for ln in str(nama_latin_field).split(' ; ') if ln.strip()]
+        else:
+            # Old format with ';' or ',' separator
+            latin_names = [ln.strip() for part in str(nama_latin_field).split(';') for ln in part.split(',') if ln.strip()]
+        
         search_keywords = row.get('search_keywords', '')
-        min_images = int(row.get('min_images', 100))
+        min_images = self.images_per_species  # Use configurable parameter instead of CSV
         
         # Create folder name using Indonesian name (cleaned)
         folder_species_name = species_name.lower().replace(' ', '_').replace('/', '_').replace('-', '_')
@@ -1405,6 +1552,14 @@ def batch_mode():
     max_species = input("\nJumlah species maksimal (kosong untuk semua): ").strip()
     max_species = int(max_species) if max_species.isdigit() else None
     
+    # Start row option
+    start_row = input("Mulai dari baris ke-berapa? (enter untuk mulai dari awal/0): ").strip()
+    start_row = int(start_row) if start_row.isdigit() else 0
+    
+    # Images per species
+    images_per_species = input("Target gambar per species (enter untuk 10): ").strip()
+    images_per_species = int(images_per_species) if images_per_species.isdigit() else 10
+    
     # Output directory
     output_dir = input("Output directory (enter untuk 'fish_images'): ").strip()
     if not output_dir:
@@ -1412,8 +1567,10 @@ def batch_mode():
     
     print(f"\n🎯 BATCH SCRAPING SETUP:")
     print(f"📁 Database: {csv_file}")
+    print(f"📍 Start Row: {start_row}")
     print(f"🏷️ Priority: {priority_filter or 'ALL'}")
     print(f"📊 Max species: {max_species or 'ALL'}")
+    print(f"🎯 Images per species: {images_per_species}")
     print(f"📂 Output: {output_dir}")
     
     confirm = input("\nStart batch scraping? (y/n): ").strip().lower()
@@ -1422,13 +1579,59 @@ def batch_mode():
         return
     
     # Start batch scraping
-    batch_scraper = BatchFishScraper(csv_file, output_dir)
+    batch_scraper = BatchFishScraper(csv_file, output_dir, images_per_species)
     batch_scraper.run_batch_scraping(
+        start_index=start_row,
         max_species=max_species,
         priority_filter=priority_filter
     )
 
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Fish Image Scraper - Scraping gambar ikan dari berbagai sumber')
+    
+    # Add subcommands
+    subparsers = parser.add_subparsers(dest='mode', help='Mode scraping')
+    
+    # Single species mode
+    single_parser = subparsers.add_parser('single', help='Scraping untuk satu species')
+    single_parser.add_argument('species', help='Nama species ikan')
+    single_parser.add_argument('--latin', help='Nama latin/scientific name')
+    single_parser.add_argument('--images', type=int, default=10, help='Minimum jumlah gambar (default: 10)')
+    single_parser.add_argument('--folder', default='fish_images', help='Output folder (default: fish_images)')
+    
+    # Batch scraping mode
+    batch_parser = subparsers.add_parser('batch', help='Batch scraping dari CSV file')
+    batch_parser.add_argument('--csv', default='fish_scraping_list_updated.csv', 
+                             help='Path ke CSV file (default: fish_scraping_list_updated.csv)')
+    batch_parser.add_argument('--start-row', type=int, default=0, 
+                             help='Mulai scraping dari baris ke-berapa (0-indexed, default: 0)')
+    batch_parser.add_argument('--max-species', type=int, 
+                             help='Maksimal jumlah species yang akan di-scraping')
+    batch_parser.add_argument('--priority', choices=['HIGH', 'MEDIUM', 'LOW'], 
+                             help='Filter berdasarkan prioritas species')
+    batch_parser.add_argument('--folder', default='fish_images', 
+                             help='Output folder (default: fish_images)')
+    batch_parser.add_argument('--images', type=int, default=10, 
+                             help='Target jumlah gambar per species (default: 10)')
+    
+    return parser.parse_args()
+
 def main():
+    args = parse_arguments()
+    
+    # Jika tidak ada arguments, jalankan interactive mode
+    if not args.mode:
+        interactive_mode()
+        return
+    
+    if args.mode == 'single':
+        single_species_mode(args)
+    elif args.mode == 'batch':
+        batch_scraping_mode(args)
+
+def interactive_mode():
+    """Interactive mode untuk backward compatibility"""
     print("🐟 Fish Image Scraper 🐟")
     print("=" * 40)
     
@@ -1448,6 +1651,66 @@ def main():
         return
     
     # Mode single species
+    single_species_interactive()
+
+def single_species_mode(args):
+    """Command line mode untuk single species"""
+    print(f"🐟 SINGLE SPECIES SCRAPING: {args.species}")
+    print("=" * 50)
+    
+    print(f"🎯 Target: {args.images} images untuk '{args.species}'")
+    if args.latin:
+        print(f"🔬 Latin name: {args.latin}")
+    print(f"📂 Output: {args.folder}/{args.species.lower().replace(' ', '_')}")
+    
+    # Start scraping
+    scraper = FishImageScraper(args.species, args.images, args.folder, args.latin)
+    
+    try:
+        downloaded = scraper.run_scraping()
+        
+        print(f"\n{'='*50}")
+        if downloaded >= args.images:
+            print(f"✅ SUCCESS! Downloaded {downloaded} images")
+        else:
+            print(f"⚠️ PARTIAL SUCCESS! Downloaded {downloaded}/{args.images} images")
+        
+        print(f"📁 Images saved in: {scraper.species_dir}")
+        print(f"{'='*50}")
+        
+    except KeyboardInterrupt:
+        print("\n❌ Scraping interrupted by user")
+    except Exception as e:
+        logger.error(f"Scraping failed: {e}")
+
+def batch_scraping_mode(args):
+    """Command line mode untuk batch scraping"""
+    print(f"🐟 BATCH SCRAPING MODE")
+    print("=" * 50)
+    
+    print(f"📁 CSV File: {args.csv}")
+    print(f"📍 Start Row: {args.start_row}")
+    print(f"📊 Max Species: {args.max_species or 'ALL'}")
+    print(f"🏷️ Priority: {args.priority or 'ALL'}")
+    print(f"📂 Output: {args.folder}")
+    print(f"🎯 Images per species: {args.images}")
+    
+    # Confirm before starting
+    confirm = input("\nStart batch scraping? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("❌ Batch scraping cancelled")
+        return
+    
+    # Start batch scraping
+    batch_scraper = BatchFishScraper(args.csv, args.folder, args.images)
+    batch_scraper.run_batch_scraping(
+        start_index=args.start_row,
+        max_species=args.max_species,
+        priority_filter=args.priority
+    )
+
+def single_species_interactive():
+    """Interactive mode untuk single species"""
     print("\n--- SINGLE SPECIES MODE ---")
     
     # Interactive input
@@ -1506,4 +1769,34 @@ def main():
         logger.error(f"Scraping failed: {e}")
 
 if __name__ == "__main__":
+    # Show usage examples if run with --help or no arguments
+    import sys
+    if len(sys.argv) == 1:
+        print("🐟 Fish Image Scraper 🐟")
+        print("=" * 50)
+        print("\nCOMMAND LINE USAGE:")
+        print("\n1. Single Species Mode:")
+        print("   python scraping.py single 'Arwana' --latin 'Scleropages formosus' --images 5")
+        print("   python scraping.py single 'Nemo' --images 10 --folder my_fish_images")
+        
+        print("\n2. Batch Scraping Mode:")
+        print("   python scraping.py batch --csv fish_scraping_top50.csv --start-row 10 --max-species 5")
+        print("   python scraping.py batch --start-row 50 --priority HIGH --images 15")
+        print("   python scraping.py batch --csv fish_scraping_list_updated.csv --start-row 100 --max-species 20")
+        
+        print("\n3. Interactive Mode:")
+        print("   python scraping.py  (tanpa parameter akan masuk ke interactive mode)")
+        
+        print("\nKEY FEATURES:")
+        print("✅ --start-row: Mulai scraping dari baris ke-berapa di CSV (0-indexed)")
+        print("✅ --max-species: Batasi jumlah species yang akan di-scraping")
+        print("✅ --priority: Filter berdasarkan prioritas (HIGH/MEDIUM/LOW)")
+        print("✅ --images: Tentukan target jumlah gambar per species")
+        print("✅ Multiple source support: Google Images (FIXED!), Wikimedia, Bing, Unsplash")
+        
+        print("\nUntuk help lengkap: python scraping.py --help")
+        print("Untuk help batch mode: python scraping.py batch --help")
+        print("Untuk help single mode: python scraping.py single --help")
+        print("")
+    
     main()
