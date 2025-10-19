@@ -55,8 +55,8 @@ class FishImageScraper:
         if self.existing_count > 0:
             logger.info(f"Found {self.existing_count} existing images in {self.species_dir}")
         
-        # Valid image extensions
-        self.valid_extensions = {'.jpg', '.jpeg', '.png'}
+        # Valid image extensions (including webp for conversion)
+        self.valid_extensions = {'.jpg', '.jpeg', '.png', '.webp'}
     
     def count_existing_images(self):
         """Count existing valid images in the species directory"""
@@ -65,11 +65,31 @@ class FishImageScraper:
         
         count = 0
         for filename in os.listdir(self.species_dir):
-            if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
                 filepath = os.path.join(self.species_dir, filename)
                 if os.path.isfile(filepath):
                     count += 1
         return count
+    
+    def get_next_file_number(self):
+        """Get the next file number for naming new images"""
+        if not os.path.exists(self.species_dir):
+            return 1
+        
+        max_num = 0
+        pattern = f"{self.species}_"
+        
+        for filename in os.listdir(self.species_dir):
+            if filename.startswith(pattern) and filename.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                try:
+                    # Extract number from filename like "species_0001.jpg"
+                    number_part = filename[len(pattern):].split('.')[0]
+                    num = int(number_part)
+                    max_num = max(max_num, num)
+                except (ValueError, IndexError):
+                    continue
+        
+        return max_num + 1
     
     def get_total_images(self):
         """Get total images including existing and newly downloaded"""
@@ -119,9 +139,9 @@ class FishImageScraper:
             response = self.session.get(url, timeout=10, stream=True)
             response.raise_for_status()
             
-            # Check content type
+            # Check content type (including webp)
             content_type = response.headers.get('content-type', '').lower()
-            if not any(img_type in content_type for img_type in ['image/jpeg', 'image/jpg', 'image/png']):
+            if not any(img_type in content_type for img_type in ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']):
                 logger.warning(f"Invalid content type: {content_type} for {url}")
                 return False
             
@@ -148,12 +168,28 @@ class FishImageScraper:
                         logger.warning(f"Aspect ratio too extreme: {aspect_ratio:.2f}")
                         return False
                     
-                    # Convert to RGB if needed and save as JPG
-                    if img.mode in ('RGBA', 'LA', 'P'):
+                    # Convert to RGB if needed (handles WEBP, PNG with transparency, etc.)
+                    if img.mode in ('RGBA', 'LA', 'P') or img.format == 'WEBP':
                         img = img.convert('RGB')
+                        logger.info(f"Converted {img.format} to RGB")
                     
-                    final_path = os.path.join(self.species_dir, f"{self.species}_{self.downloaded_count + 1:04d}.jpg")
-                    img.save(final_path, 'JPEG', quality=95)
+                    # Get next file number (continues from existing images)
+                    file_number = self.existing_count + self.downloaded_count + 1
+                    
+                    # Determine file extension based on original format
+                    if content_type == 'image/png' and img.mode != 'RGB':
+                        # Keep as PNG if it has transparency
+                        final_path = os.path.join(self.species_dir, f"{self.species}_{file_number:04d}.png")
+                        img.save(final_path, 'PNG', optimize=True)
+                        logger.info(f"Saved PNG with transparency: {final_path}")
+                    else:
+                        # Convert everything else to JPG (including WEBP)
+                        final_path = os.path.join(self.species_dir, f"{self.species}_{file_number:04d}.jpg")
+                        img.save(final_path, 'JPEG', quality=95, optimize=True)
+                        if img.format == 'WEBP':
+                            logger.info(f"Converted WEBP to JPG: {final_path}")
+                        else:
+                            logger.info(f"Saved JPG: {final_path}")
                     
                 os.remove(temp_path)
                 self.downloaded_count += 1
@@ -302,7 +338,7 @@ class FishImageScraper:
                 pass
     
     def scrape_bing_images(self):
-        """Scrape images from Bing Images"""
+        """Scrape images from Bing Images with improved selectors"""
         logger.info("Scraping Bing Images...")
         
         # Use only the Latin name - no additional keywords
@@ -310,48 +346,78 @@ class FishImageScraper:
             logger.error("No Latin name available for Bing Images search")
             return
             
-        search_query = self.current_search_term
+        search_query = self.current_search_term.replace(' ', '%20')
         logger.info(f"🔍 Bing search query (Latin only): {search_query}")
         
-        for page in range(0, min(5, (self.min_images // 35) + 1)):
+        for page in range(0, min(3, (self.min_images // 35) + 1)):
             if self.is_target_reached():
                 break
                 
             try:
-                url = f"https://www.bing.com/images/search?q={search_query}&first={page * 35}"
-                response = self.session.get(url, timeout=10)
+                # Better Bing Images URL with proper parameters
+                url = f"https://www.bing.com/images/search?q={search_query}&form=HDRSC2&first={page * 35}&tsc=ImageBasicHover"
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                
+                response = self.session.get(url, headers=headers, timeout=15)
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # Try multiple selectors for Bing images
-                img_tags = (soup.find_all('img', {'class': 'mimg'}) + 
-                           soup.find_all('img', src=True) + 
-                           soup.find_all('img', {'data-src': True}))
+                # Look for actual image data in JSON or data attributes
+                import re
+                import json
                 
-                logger.info(f"Found {len(img_tags)} images on Bing page {page}")
+                # Method 1: Find images in script tags (more reliable)
+                scripts = soup.find_all('script')
+                img_urls_found = []
                 
-                for i, img in enumerate(img_tags):
+                for script in scripts:
+                    if script.string:
+                        # Look for image URLs in script content
+                        matches = re.findall(r'"murl":"([^"]+\.(?:jpg|jpeg|png|webp))"', script.string)
+                        img_urls_found.extend(matches)
+                        
+                        # Also look for other URL patterns
+                        matches2 = re.findall(r'"turl":"([^"]+\.(?:jpg|jpeg|png|webp))"', script.string)
+                        img_urls_found.extend(matches2)
+                
+                # Method 2: Look for img tags with better selectors
+                img_elements = soup.find_all('img', {'class': lambda x: x and ('mimg' in x or 'iusc' in x)})
+                
+                for img in img_elements:
+                    # Get metadata from parent elements
+                    parent = img.find_parent('a') or img.find_parent('div')
+                    if parent:
+                        # Look for data attributes on parent
+                        img_data = parent.get('m') or parent.get('data-m')
+                        if img_data:
+                            try:
+                                data = json.loads(img_data)
+                                if 'murl' in data:
+                                    img_urls_found.append(data['murl'])
+                                elif 'turl' in data:
+                                    img_urls_found.append(data['turl'])
+                            except:
+                                pass
+                
+                # Remove duplicates and filter
+                img_urls_found = list(set(img_urls_found))
+                logger.info(f"Found {len(img_urls_found)} potential images on Bing page {page}")
+                
+                for i, img_url in enumerate(img_urls_found):
                     if self.is_target_reached():
                         break
-                        
-                    img_url = (img.get('data-src') or img.get('src') or 
-                              img.get('data-original') or img.get('data-srcset'))
                     
-                    if img_url and 'http' in img_url:
-                        # Clean up URL
-                        if img_url.startswith('//'):
-                            img_url = 'https:' + img_url
-                        elif img_url.startswith('/'):
-                            img_url = 'https://www.bing.com' + img_url
-                        
-                        # Take first URL if srcset
-                        if ' ' in img_url:
-                            img_url = img_url.split(' ')[0]
-                            
-                        if self.is_valid_image_url(img_url):
-                            logger.info(f"Trying Bing image: {img_url}")
-                            if self.download_image(img_url, f"bing_{page}_{i}.jpg"):
-                                pass
-                            time.sleep(random.uniform(1, 2))
+                    # Clean up URL
+                    if img_url.startswith('\\'):
+                        img_url = img_url.replace('\\', '')
+                    
+                    if self.is_valid_image_url(img_url):
+                        logger.info(f"Trying Bing image: {img_url}")
+                        if self.download_image(img_url, f"bing_{page}_{i}.jpg"):
+                            pass
+                        time.sleep(random.uniform(1, 2))
                         
             except Exception as e:
                 logger.error(f"Bing scraping failed for page {page}: {e}")
@@ -409,7 +475,7 @@ class FishImageScraper:
             logger.error(f"FishBase scraping failed: {e}")
     
     def scrape_unsplash(self):
-        """Scrape images from Unsplash (free stock photos)"""
+        """Scrape images from Unsplash with improved search"""
         logger.info("Scraping Unsplash...")
         
         try:
@@ -418,82 +484,171 @@ class FishImageScraper:
                 logger.error("No Latin name available for Unsplash search")
                 return
                 
-            search_query = self.current_search_term
-            url = f"https://unsplash.com/s/photos/{search_query}"
-            logger.info(f"🔍 Unsplash search query (Latin only): {search_query}")
+            search_query = self.current_search_term.replace(' ', '%20')
             
-            response = self.session.get(url, timeout=10)
-            soup = BeautifulSoup(response.content, 'html.parser')
+            # Try multiple search strategies for fish
+            search_variations = [
+                search_query,
+                f"{search_query}%20fish",
+                f"fish%20{search_query}",
+            ]
             
-            # Find image containers
-            img_tags = soup.find_all('img', src=True)
-            
-            logger.info(f"Found {len(img_tags)} images on Unsplash")
-            
-            for i, img in enumerate(img_tags):
-                if self.downloaded_count >= self.min_images:
+            for variation in search_variations:
+                if self.is_target_reached():
                     break
                     
-                img_url = img.get('src')
-                if img_url and 'unsplash' in img_url:
-                    # Skip profile images and small images
-                    if 'profile-' in img_url or 'h=32' in img_url or 'w=32' in img_url:
-                        continue
+                url = f"https://unsplash.com/napi/search/photos?query={variation}&per_page=30&page=1"
+                logger.info(f"🔍 Unsplash API search: {variation}")
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                    'Accept': 'application/json',
+                }
+                
+                try:
+                    response = self.session.get(url, headers=headers, timeout=15)
                     
-                    # Only process actual photo URLs
-                    if '/photo-' in img_url or '/uploads/' in img_url:
-                        # Get higher resolution version
-                        if '?w=' in img_url:
-                            img_url = img_url.replace('?w=400', '?w=1080').replace('?w=200', '?w=1080')
+                    if response.status_code == 200:
+                        data = response.json()
+                        results = data.get('results', [])
                         
-                        if self.is_valid_image_url(img_url):
-                            logger.info(f"Trying Unsplash image: {img_url}")
-                            if self.download_image(img_url, f"unsplash_{i}.jpg"):
-                                pass
-                            time.sleep(random.uniform(1, 2))
+                        logger.info(f"Found {len(results)} images from Unsplash API")
+                        
+                        for i, result in enumerate(results):
+                            if self.is_target_reached():
+                                break
+                            
+                            # Get different sizes
+                            urls = result.get('urls', {})
+                            img_url = urls.get('regular') or urls.get('small') or urls.get('thumb')
+                            
+                            if img_url and self.is_valid_image_url(img_url):
+                                logger.info(f"Trying Unsplash image: {img_url}")
+                                if self.download_image(img_url, f"unsplash_{variation}_{i}.jpg"):
+                                    pass
+                                time.sleep(random.uniform(1, 2))
+                                
+                except Exception as api_error:
+                    logger.warning(f"Unsplash API failed for {variation}: {api_error}")
+                    
+                    # Fallback to HTML scraping
+                    try:
+                        html_url = f"https://unsplash.com/s/photos/{variation}"
+                        html_response = self.session.get(html_url, timeout=10)
+                        soup = BeautifulSoup(html_response.content, 'html.parser')
+                        
+                        img_tags = soup.find_all('img', src=True)
+                        
+                        for i, img in enumerate(img_tags):
+                            if self.is_target_reached():
+                                break
+                                
+                            img_url = img.get('src')
+                            if img_url and 'images.unsplash.com' in img_url:
+                                # Skip profile images and small images
+                                if 'profile-' in img_url or 'h=32' in img_url or 'w=32' in img_url:
+                                    continue
+                                
+                                # Get higher resolution
+                                if '?w=' in img_url:
+                                    img_url = img_url.replace('?w=400', '?w=1080').replace('?w=200', '?w=1080')
+                                
+                                if self.is_valid_image_url(img_url):
+                                    logger.info(f"Trying Unsplash HTML image: {img_url}")
+                                    if self.download_image(img_url, f"unsplash_html_{i}.jpg"):
+                                        pass
+                                    time.sleep(random.uniform(1, 2))
+                                    
+                    except Exception as html_error:
+                        logger.error(f"Unsplash HTML fallback failed: {html_error}")
+                
+                time.sleep(2)  # Rate limiting
                     
         except Exception as e:
             logger.error(f"Unsplash scraping failed: {e}")
     
     def scrape_simple_images(self):
-        """Simple image search using DuckDuckGo (no JavaScript needed)"""
-        logger.info("Scraping DuckDuckGo Images...")
+        """Alternative image search using multiple search engines"""
+        logger.info("Scraping alternative image sources...")
         
         try:
             # Use only the Latin name - no additional keywords
             if not self.current_search_term:
-                logger.error("No Latin name available for DuckDuckGo search")
+                logger.error("No search term available")
                 return
                 
-            search_query = self.current_search_term
-            url = f"https://duckduckgo.com/?q={search_query}&t=h_&iax=images&ia=images"
-            logger.info(f"🔍 DuckDuckGo search query (Latin only): {search_query}")
+            search_query = self.current_search_term.replace(' ', '+')
+            logger.info(f"🔍 Alternative search query: {search_query}")
             
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
             }
             
-            # Disable SSL verification for DuckDuckGo
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            # Alternative search engines that are more reliable
+            search_sources = [
+                {
+                    'name': 'Yandex',
+                    'url': f"https://yandex.com/images/search?text={search_query}+fish",
+                    'selector': 'img[src*="avatars.mds.yandex.net"]'
+                },
+                {
+                    'name': 'Startpage',
+                    'url': f"https://www.startpage.com/sp/search?query={search_query}+fish&cat=images",
+                    'selector': 'img[src]'
+                }
+            ]
             
-            # Extract image URLs from the page
-            import re
-            img_urls = re.findall(r'https://[^"]*\.(?:jpg|jpeg|png)', response.text)
-            
-            logger.info(f"Found {len(img_urls)} potential images")
-            
-            for i, img_url in enumerate(img_urls[:50]):  # Limit to first 50
-                if self.downloaded_count >= self.min_images:
+            for source in search_sources:
+                if self.is_target_reached():
                     break
                     
-                if self.is_valid_image_url(img_url):
-                    logger.info(f"Trying image: {img_url}")
-                    if self.download_image(img_url, f"simple_{i}.jpg"):
-                        pass
-                    time.sleep(random.uniform(1, 2))
+                try:
+                    logger.info(f"Trying {source['name']} images...")
+                    response = self.session.get(source['url'], headers=headers, timeout=15, verify=False)
+                    soup = BeautifulSoup(response.content, 'html.parser')
                     
+                    # Extract image URLs using regex (more reliable)
+                    import re
+                    text = response.text
+                    
+                    # Look for various image URL patterns
+                    patterns = [
+                        r'https://[^"\s]*\.jpg',
+                        r'https://[^"\s]*\.jpeg', 
+                        r'https://[^"\s]*\.png',
+                        r'https://[^"\s]*\.webp'
+                    ]
+                    
+                    img_urls = []
+                    for pattern in patterns:
+                        matches = re.findall(pattern, text, re.IGNORECASE)
+                        img_urls.extend(matches)
+                    
+                    # Remove duplicates and filter out unwanted URLs
+                    img_urls = list(set(img_urls))
+                    img_urls = [url for url in img_urls if not any(x in url.lower() for x in ['avatar', 'logo', 'icon', 'button', 'banner'])]
+                    
+                    logger.info(f"Found {len(img_urls)} potential images from {source['name']}")
+                    
+                    for i, img_url in enumerate(img_urls[:20]):
+                        if self.is_target_reached():
+                            break
+                            
+                        if self.is_valid_image_url(img_url):
+                            logger.info(f"Trying {source['name']} image: {img_url}")
+                            if self.download_image(img_url, f"{source['name'].lower()}_{i}.jpg"):
+                                pass
+                            time.sleep(random.uniform(1, 2))
+                            
+                except Exception as source_error:
+                    logger.error(f"{source['name']} search failed: {source_error}")
+                
+                time.sleep(2)
+                
         except Exception as e:
-            logger.error(f"Simple scraping failed: {e}")
+            logger.error(f"Alternative search failed: {e}")
     
     def scrape_wikimedia(self):
         """Scrape images from Wikimedia Commons (reliable source)"""
@@ -518,7 +673,7 @@ class FishImageScraper:
                 'list': 'search',
                 'srsearch': ' OR '.join(search_terms),
                 'srnamespace': 6,  # File namespace
-                'srlimit': 50
+                'srlimit': 100
             }
             
             response = self.session.get(api_url, params=params, timeout=10)
@@ -545,20 +700,201 @@ class FishImageScraper:
         except Exception as e:
             logger.error(f"Wikimedia scraping failed: {e}")
     
+    def scrape_flickr_images(self):
+        """Scrape images from Flickr"""
+        logger.info("Scraping Flickr...")
+        
+        try:
+            if not self.current_search_term:
+                logger.error("No search term available for Flickr")
+                return
+                
+            search_query = self.current_search_term.replace(' ', '%20')
+            
+            # Search variations for fish
+            search_terms = [
+                search_query,
+                f"{search_query}%20fish",
+                f"fish%20{search_query}"
+            ]
+            
+            for term in search_terms:
+                if self.is_target_reached():
+                    break
+                    
+                url = f"https://www.flickr.com/search/?text={term}"
+                logger.info(f"🔍 Flickr search: {term}")
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                }
+                
+                try:
+                    response = self.session.get(url, headers=headers, timeout=15)
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    
+                    # Look for Flickr image patterns
+                    img_tags = soup.find_all('img', src=True)
+                    
+                    for i, img in enumerate(img_tags):
+                        if self.is_target_reached():
+                            break
+                            
+                        img_url = img.get('src')
+                        if img_url and 'flickr' in img_url and any(ext in img_url for ext in ['.jpg', '.jpeg', '.png']):
+                            # Get larger version
+                            if '_m.jpg' in img_url:
+                                img_url = img_url.replace('_m.jpg', '_b.jpg')
+                            elif '_s.jpg' in img_url:
+                                img_url = img_url.replace('_s.jpg', '_b.jpg')
+                            
+                            if self.is_valid_image_url(img_url):
+                                logger.info(f"Trying Flickr image: {img_url}")
+                                if self.download_image(img_url, f"flickr_{term}_{i}.jpg"):
+                                    pass
+                                time.sleep(random.uniform(1, 2))
+                                
+                except Exception as e:
+                    logger.error(f"Flickr search failed for {term}: {e}")
+                
+                time.sleep(2)
+                
+        except Exception as e:
+            logger.error(f"Flickr scraping failed: {e}")
+    
+    def scrape_pexels_images(self):
+        """Scrape images from Pexels"""
+        logger.info("Scraping Pexels...")
+        
+        try:
+            if not self.current_search_term:
+                logger.error("No search term available for Pexels")
+                return
+                
+            search_query = self.current_search_term.replace(' ', '%20')
+            
+            search_terms = [
+                search_query,
+                f"{search_query}%20fish",
+                f"fish%20{search_query}"
+            ]
+            
+            for term in search_terms:
+                if self.is_target_reached():
+                    break
+                    
+                url = f"https://www.pexels.com/search/{term}/"
+                logger.info(f"🔍 Pexels search: {term}")
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                }
+                
+                try:
+                    response = self.session.get(url, headers=headers, timeout=15)
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    
+                    # Look for Pexels image patterns
+                    img_tags = soup.find_all('img', src=True)
+                    
+                    for i, img in enumerate(img_tags):
+                        if self.is_target_reached():
+                            break
+                            
+                        img_url = img.get('src')
+                        if img_url and 'pexels.com' in img_url and '/photos/' in img_url:
+                            # Get higher resolution
+                            if '?w=' in img_url:
+                                img_url = img_url.split('?')[0]  # Remove parameters
+                                img_url += '?w=1200&h=800&auto=compress'
+                            
+                            if self.is_valid_image_url(img_url):
+                                logger.info(f"Trying Pexels image: {img_url}")
+                                if self.download_image(img_url, f"pexels_{term}_{i}.jpg"):
+                                    pass
+                                time.sleep(random.uniform(1, 2))
+                                
+                except Exception as e:
+                    logger.error(f"Pexels search failed for {term}: {e}")
+                
+                time.sleep(2)
+                
+        except Exception as e:
+            logger.error(f"Pexels scraping failed: {e}")
+
+    def scrape_pixabay_images(self):
+        """Scrape images from Pixabay"""
+        logger.info("Scraping Pixabay...")
+        
+        try:
+            if not self.current_search_term:
+                logger.error("No search term available for Pixabay")
+                return
+                
+            search_query = self.current_search_term.replace(' ', '+')
+            
+            search_terms = [
+                search_query,
+                f"{search_query}+fish",
+                f"fish+{search_query}"
+            ]
+            
+            for term in search_terms:
+                if self.is_target_reached():
+                    break
+                    
+                url = f"https://pixabay.com/images/search/{term}/"
+                logger.info(f"🔍 Pixabay search: {term}")
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                }
+                
+                try:
+                    response = self.session.get(url, headers=headers, timeout=15)
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    
+                    # Look for Pixabay image patterns
+                    img_tags = soup.find_all('img', src=True)
+                    
+                    for i, img in enumerate(img_tags):
+                        if self.is_target_reached():
+                            break
+                            
+                        img_url = img.get('src')
+                        if img_url and 'pixabay.com' in img_url and '/photo-' in img_url:
+                            # Get higher resolution
+                            if '_640.' in img_url:
+                                img_url = img_url.replace('_640.', '_1280.')
+                            elif '_150.' in img_url:
+                                img_url = img_url.replace('_150.', '_1280.')
+                            
+                            if self.is_valid_image_url(img_url):
+                                logger.info(f"Trying Pixabay image: {img_url}")
+                                if self.download_image(img_url, f"pixabay_{term}_{i}.jpg"):
+                                    pass
+                                time.sleep(random.uniform(1, 2))
+                                
+                except Exception as e:
+                    logger.error(f"Pixabay search failed for {term}: {e}")
+                
+                time.sleep(2)
+                
+        except Exception as e:
+            logger.error(f"Pixabay scraping failed: {e}")
+
     def scrape_fish_specific_sites(self):
         """Scrape from fish-specific websites and databases"""
         logger.info("Scraping fish-specific websites...")
         
         try:
             # Use current search term (prioritizing Latin name)
-            search_query = self.current_search_term
+            search_query = self.current_search_term.replace(' ', '+')
             logger.info(f"🔍 Fish sites search query: {search_query}")
             
             # Fish-specific websites to try
             fish_sites = [
-                f"https://www.fisheries.go.id/search?q={search_query}",
-                f"https://www.indonesianfishes.org/search/{search_query}",
-                f"https://www.iucnredlist.org/search?query={search_query}",
+                f"https://www.fishbase.se/search.php?SearchRequest_Name={search_query}",
                 f"https://www.marinespecies.org/aphia.php?p=search&searchpar={search_query}",
             ]
             
@@ -769,15 +1105,18 @@ class FishImageScraper:
         remaining_needed = self.get_remaining_needed()
         progress_bar = tqdm(total=remaining_needed, desc="Downloading images", initial=0)
         
-        # Try different sources until we get enough images - Latin name only
+        # Try different sources until we get enough images - prioritizing non-Wikipedia sources
         scrapers = [
-            lambda: self.scrape_wikipedia_images(self.scientific_name),    # Wikipedia articles (reliable, relevant)
-            self.scrape_wikimedia,           # Wikimedia Commons (reliable, free)
+            # self.scrape_unsplash,            # Free stock photos (good quality) ✅
+            self.scrape_bing_images,         # Bing images (improved) ✅
+            # self.scrape_pexels_images,       # Pexels stock photos
+            # self.scrape_pixabay_images,      # Pixabay stock photos
+            self.scrape_flickr_images,       # Flickr photos (high quality)
+            # self.scrape_simple_images,       # Alternative search engines
+            self.scrape_google_images,       # Google images (as fallback)
             self.scrape_fishbase,            # Fish-specific database
-            self.scrape_unsplash,            # Free stock photos (Latin name)
-            self.scrape_bing_images,         # Bing images (Latin name)
-            self.scrape_simple_images,       # DuckDuckGo (Latin name)
-            self.scrape_google_images,       # Google images (Latin name)
+            self.scrape_wikimedia,           # Wikimedia Commons
+            lambda: self.scrape_wikipedia_images(self.scientific_name),    # Wikipedia articles (last resort)
         ]
         
         for scraper in scrapers:
