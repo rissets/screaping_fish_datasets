@@ -810,7 +810,7 @@ class FishImageScraper:
                 'list': 'search',
                 'srsearch': ' OR '.join(search_terms),
                 'srnamespace': 6,  # File namespace
-                'srlimit': 100
+                'srlimit': 50
             }
             
             response = self.session.get(api_url, params=params, timeout=10)

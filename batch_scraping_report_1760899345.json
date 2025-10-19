@@ -1,0 +1,69 @@
+{
+  "summary": {
+    "total_species": 5,
+    "successful": 5,
+    "partial": 0,
+    "failed": 0,
+    "total_images_downloaded": 50,
+    "target_images": 50,
+    "success_rate": 100.0,
+    "completion_rate": 100.0
+  },
+  "detailed_results": [
+    {
+      "species_indonesia": "Batu laga",
+      "species_english": "green shell",
+      "search_keyword_used": "Turbo marmoratus",
+      "target_images": 10,
+      "downloaded_images": 10,
+      "success_rate": 100.0,
+      "status": "SUCCESS",
+      "directory": "fish_images/batu_laga",
+      "attempt": 1
+    },
+    {
+      "species_indonesia": "Baung",
+      "species_english": "catfish",
+      "search_keyword_used": "Hemibagrus caveatus",
+      "target_images": 10,
+      "downloaded_images": 10,
+      "success_rate": 100.0,
+      "status": "SUCCESS",
+      "directory": "fish_images/baung",
+      "attempt": 1
+    },
+    {
+      "species_indonesia": "Baung bongan",
+      "species_english": "catfish",
+      "search_keyword_used": "Hemibagrus bongan",
+      "target_images": 10,
+      "downloaded_images": 10,
+      "success_rate": 100.0,
+      "status": "SUCCESS",
+      "directory": "fish_images/baung_bongan",
+      "attempt": 1
+    },
+    {
+      "species_indonesia": "Baung burai",
+      "species_english": "crystal-eyed catfish",
+      "search_keyword_used": "Hemibagrus wyckii",
+      "target_images": 10,
+      "downloaded_images": 10,
+      "success_rate": 100.0,
+      "status": "SUCCESS",
+      "directory": "fish_images/baung_burai",
+      "attempt": 1
+    },
+    {
+      "species_indonesia": "Baung hoven",
+      "species_english": "catfish",
+      "search_keyword_used": "Hemibagrus hoevenii",
+      "target_images": 10,
+      "downloaded_images": 10,
+      "success_rate": 100.0,
+      "status": "SUCCESS",
+      "directory": "fish_images/baung_hoven",
+      "attempt": 1
+    }
+  ]
+}
