@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  fish-scraper:
+    build: .
+    container_name: fish-image-scraper
+    volumes:
+      - ./fish_images:/app/fish_images
+      - ./logs:/app/logs
+      - ./fish_scraping_list_updated.csv:/app/fish_scraping_list_updated.csv:ro
+      - ./fish_scraping_top50.csv:/app/fish_scraping_top50.csv:ro
+    environment:
+      - DISPLAY=:99
+      - CHROME_HEADLESS=1
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    shm_size: 2g  # Increase shared memory for Chrome
+    security_opt:
+      - seccomp:unconfined  # Required for Chrome sandbox
+    networks:
+      - scraper-network
+
+  # Optional: Add a monitoring service
+  watchtower:
+    image: containrrr/watchtower
+    container_name: fish-scraper-watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=3600  # Check every hour
+      - WATCHTOWER_CLEANUP=true
+    restart: unless-stopped
+    networks:
+      - scraper-network
+
+networks:
+  scraper-network:
+    driver: bridge
+
+volumes:
+  fish_images:
+  logs:

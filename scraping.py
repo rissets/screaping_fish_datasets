@@ -809,7 +809,7 @@ class BatchFishScraper:
                 result = {
                     'species_indonesia': species_name,
                     'species_english': row['species_english'],
-                    'search_keyword_used': primary_keyword,
+                    'search_keyword_used': current_search,
                     'target_images': min_images,
                     'downloaded_images': downloaded,
                     'success_rate': (downloaded / min_images) * 100,
@@ -818,16 +818,18 @@ class BatchFishScraper:
                     'attempt': attempt + 1
                 }
                 
-                # Jika berhasil atau sudah max retries, return
-                if downloaded >= min_images or attempt == max_retries:
+                # ✅ Jika berhasil mencapai target, langsung return
+                if downloaded >= min_images:
+                    logger.info(f"✅ SUCCESS! Got {downloaded}/{min_images} images for {species_name}")
                     return result
                 
-                # Jika gagal, coba dengan keyword alternatif
+                # ⚠️ Jika belum berhasil dan masih ada attempt, lanjut ke attempt berikutnya
                 if attempt < max_retries:
-                    keywords = search_keywords.split(';')
-                    if len(keywords) > attempt + 1:
-                        primary_keyword = keywords[attempt + 1].strip()
-                        logger.info(f"🔄 Retry {attempt + 1} with keyword: {primary_keyword}")
+                    logger.info(f"⚠️ Got only {downloaded}/{min_images} images, trying next strategy...")
+                else:
+                    # ❌ Sudah max retries, return hasil terbaik yang didapat
+                    logger.warning(f"❌ Max retries reached. Final result: {downloaded}/{min_images} images")
+                    return result
                         
             except Exception as e:
                 logger.error(f"Attempt {attempt + 1} failed for {species_name}: {e}")
@@ -835,7 +837,7 @@ class BatchFishScraper:
                     return {
                         'species_indonesia': species_name,
                         'species_english': row['species_english'],
-                        'search_keyword_used': primary_keyword,
+                        'search_keyword_used': current_search if 'current_search' in locals() else 'unknown',
                         'target_images': min_images,
                         'downloaded_images': 0,
                         'success_rate': 0,
