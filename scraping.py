@@ -827,8 +827,8 @@ class BatchFishScraper:
     def scrape_species(self, row, max_retries=2):
         """Scrape single species dengan retry mechanism menggunakan nama Latin sebagai prioritas"""
         species_name = row['species_indonesia']
-        # Accept either 'nama_ilmiah' or 'nama_ilmiah'/'nama_latin' field
-        nama_latin_field = row.get('nama_ilmiah') or row.get('nama_latin') or ''
+        # Get scientific names from CSV (nama_latin field)
+        nama_latin_field = row.get('nama_latin') or ''
         # Some records may contain multiple latin names separated by ';' or ','
         latin_names = [ln.strip() for part in str(nama_latin_field).split(';') for ln in part.split(',') if ln.strip()]
         search_keywords = row.get('search_keywords', '')
