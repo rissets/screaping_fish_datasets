@@ -50,8 +50,39 @@ class FishImageScraper:
         self.species_dir = os.path.join(output_dir, self.species)
         os.makedirs(self.species_dir, exist_ok=True)
         
+        # Check existing images in folder
+        self.existing_count = self.count_existing_images()
+        if self.existing_count > 0:
+            logger.info(f"Found {self.existing_count} existing images in {self.species_dir}")
+        
         # Valid image extensions
         self.valid_extensions = {'.jpg', '.jpeg', '.png'}
+    
+    def count_existing_images(self):
+        """Count existing valid images in the species directory"""
+        if not os.path.exists(self.species_dir):
+            return 0
+        
+        count = 0
+        for filename in os.listdir(self.species_dir):
+            if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                filepath = os.path.join(self.species_dir, filename)
+                if os.path.isfile(filepath):
+                    count += 1
+        return count
+    
+    def get_total_images(self):
+        """Get total images including existing and newly downloaded"""
+        return self.existing_count + self.downloaded_count
+        
+    def is_target_reached(self):
+        """Check if target number of images is reached"""
+        return self.get_total_images() >= self.min_images
+        
+    def get_remaining_needed(self):
+        """Get number of images still needed to reach target"""
+        total = self.get_total_images()
+        return max(0, self.min_images - total)
         
     def is_valid_image_url(self, url):
         """Check if URL points to a valid image"""
@@ -199,11 +230,15 @@ class FishImageScraper:
         
         try:
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            # Use current search term (prioritizing Latin name)
+            # Use only the Latin name - no additional keywords
+            if not self.current_search_term:
+                logger.error("No Latin name available for Google Images search")
+                return
+            
             search_query = self.current_search_term
             url = f"https://www.google.com/search?q={search_query}&tbm=isch"
             
-            logger.info(f"🔍 Google Images search query: {search_query}")
+            logger.info(f"🔍 Google Images search query (Latin only): {search_query}")
             
             driver.get(url)
             time.sleep(2)
@@ -212,7 +247,7 @@ class FishImageScraper:
             last_height = driver.execute_script("return document.body.scrollHeight")
             images_collected = 0
             
-            while self.downloaded_count < self.min_images and images_collected < self.min_images * 3:
+            while not self.is_target_reached() and images_collected < self.min_images * 3:
                 # Scroll down
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time.sleep(2)
@@ -229,7 +264,7 @@ class FishImageScraper:
                 images = driver.find_elements(By.CSS_SELECTOR, "img")
                 
                 for img in images:
-                    if self.downloaded_count >= self.min_images:
+                    if self.is_target_reached():
                         break
                     
                     # Try multiple attributes to get image URL
@@ -270,12 +305,16 @@ class FishImageScraper:
         """Scrape images from Bing Images"""
         logger.info("Scraping Bing Images...")
         
-        # Use current search term (prioritizing Latin name)
+        # Use only the Latin name - no additional keywords
+        if not self.current_search_term:
+            logger.error("No Latin name available for Bing Images search")
+            return
+            
         search_query = self.current_search_term
-        logger.info(f"🔍 Bing search query: {search_query}")
+        logger.info(f"🔍 Bing search query (Latin only): {search_query}")
         
         for page in range(0, min(5, (self.min_images // 35) + 1)):
-            if self.downloaded_count >= self.min_images:
+            if self.is_target_reached():
                 break
                 
             try:
@@ -291,7 +330,7 @@ class FishImageScraper:
                 logger.info(f"Found {len(img_tags)} images on Bing page {page}")
                 
                 for i, img in enumerate(img_tags):
-                    if self.downloaded_count >= self.min_images:
+                    if self.is_target_reached():
                         break
                         
                     img_url = (img.get('data-src') or img.get('src') or 
@@ -374,10 +413,14 @@ class FishImageScraper:
         logger.info("Scraping Unsplash...")
         
         try:
-            # Use current search term (prioritizing Latin name)
+            # Use only the Latin name - no additional keywords
+            if not self.current_search_term:
+                logger.error("No Latin name available for Unsplash search")
+                return
+                
             search_query = self.current_search_term
             url = f"https://unsplash.com/s/photos/{search_query}"
-            logger.info(f"🔍 Unsplash search query: {search_query}")
+            logger.info(f"🔍 Unsplash search query (Latin only): {search_query}")
             
             response = self.session.get(url, timeout=10)
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -417,10 +460,14 @@ class FishImageScraper:
         logger.info("Scraping DuckDuckGo Images...")
         
         try:
-            # Use current search term (prioritizing Latin name)
+            # Use only the Latin name - no additional keywords
+            if not self.current_search_term:
+                logger.error("No Latin name available for DuckDuckGo search")
+                return
+                
             search_query = self.current_search_term
             url = f"https://duckduckgo.com/?q={search_query}&t=h_&iax=images&ia=images"
-            logger.info(f"🔍 DuckDuckGo search query: {search_query}")
+            logger.info(f"🔍 DuckDuckGo search query (Latin only): {search_query}")
             
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
@@ -710,45 +757,54 @@ class FishImageScraper:
         """Main scraping function"""
         logger.info(f"Starting to scrape images for: {self.species}")
         logger.info(f"Target: {self.min_images} images")
+        logger.info(f"Existing: {self.existing_count} images")
+        logger.info(f"Need to download: {self.get_remaining_needed()} images")
         logger.info(f"Output directory: {self.species_dir}")
         
-        progress_bar = tqdm(total=self.min_images, desc="Downloading images")
+        # Check if we already have enough images
+        if self.is_target_reached():
+            logger.info(f"✅ Already have {self.get_total_images()} images (>= {self.min_images}). Skipping scraping.")
+            return self.get_total_images()
         
-        # Try different sources until we get enough images
+        remaining_needed = self.get_remaining_needed()
+        progress_bar = tqdm(total=remaining_needed, desc="Downloading images", initial=0)
+        
+        # Try different sources until we get enough images - Latin name only
         scrapers = [
             lambda: self.scrape_wikipedia_images(self.scientific_name),    # Wikipedia articles (reliable, relevant)
             self.scrape_wikimedia,           # Wikimedia Commons (reliable, free)
-            self.scrape_indonesian_fish_sites, # Indonesian fish databases
-            self.scrape_fish_specific_sites, # Fish-specific websites
-            self.scrape_unsplash,            # Free stock photos
-            self.scrape_bing_images,         # Bing images
-            self.scrape_simple_images,       # DuckDuckGo (with SSL fix)
             self.scrape_fishbase,            # Fish-specific database
-            self.scrape_google_images,       # Google images (last resort)
+            self.scrape_unsplash,            # Free stock photos (Latin name)
+            self.scrape_bing_images,         # Bing images (Latin name)
+            self.scrape_simple_images,       # DuckDuckGo (Latin name)
+            self.scrape_google_images,       # Google images (Latin name)
         ]
         
         for scraper in scrapers:
-            if self.downloaded_count >= self.min_images:
+            if self.is_target_reached():
                 break
                 
             initial_count = self.downloaded_count
             scraper()
             progress_bar.update(self.downloaded_count - initial_count)
             
-            logger.info(f"Progress: {self.downloaded_count}/{self.min_images}")
+            total_images = self.get_total_images()
+            logger.info(f"Progress: {total_images}/{self.min_images} (existing: {self.existing_count}, downloaded: {self.downloaded_count})")
             
-            if self.downloaded_count < self.min_images:
-                logger.info("Retrying with more aggressive scraping...")
+            if not self.is_target_reached():
+                remaining = self.get_remaining_needed()
+                logger.info(f"Still need {remaining} more images...")
                 time.sleep(5)
         
         progress_bar.close()
         
-        if self.downloaded_count >= self.min_images:
-            logger.info(f"✅ Successfully downloaded {self.downloaded_count} images!")
+        total_images = self.get_total_images()
+        if self.is_target_reached():
+            logger.info(f"✅ Successfully reached target! Total: {total_images} images (existing: {self.existing_count}, downloaded: {self.downloaded_count})")
         else:
-            logger.warning(f"⚠️ Only downloaded {self.downloaded_count}/{self.min_images} images")
+            logger.warning(f"⚠️ Only reached {total_images}/{self.min_images} images (existing: {self.existing_count}, downloaded: {self.downloaded_count})")
         
-        return self.downloaded_count
+        return total_images
 
 class BatchFishScraper:
     """Batch scraper untuk scraping multiple species dari CSV file"""
@@ -771,81 +827,90 @@ class BatchFishScraper:
     def scrape_species(self, row, max_retries=2):
         """Scrape single species dengan retry mechanism menggunakan nama Latin sebagai prioritas"""
         species_name = row['species_indonesia']
-        nama_latin = row['nama_latin']  # Primary search term
-        search_keywords = row['search_keywords']
-        min_images = row['min_images']
+        # Accept either 'nama_ilmiah' or 'nama_ilmiah'/'nama_latin' field
+        nama_latin_field = row.get('nama_ilmiah') or row.get('nama_latin') or ''
+        # Some records may contain multiple latin names separated by ';' or ','
+        latin_names = [ln.strip() for part in str(nama_latin_field).split(';') for ln in part.split(',') if ln.strip()]
+        search_keywords = row.get('search_keywords', '')
+        min_images = int(row.get('min_images', 100))
         
         # Create folder name using Indonesian name (cleaned)
         folder_species_name = species_name.lower().replace(' ', '_').replace('/', '_').replace('-', '_')
-        
+
         logger.info(f"\n🐟 Starting scraping: {species_name}")
-        logger.info(f"� Latin name (primary): {nama_latin}")
-        logger.info(f"�📝 Fallback keywords: {search_keywords}")
+        logger.info(f"🔬 Latin names: {', '.join(latin_names) if latin_names else 'None'}")
+        logger.info(f"📝 Fallback keywords: {search_keywords}")
         logger.info(f"🎯 Target: {min_images} images")
         logger.info(f"📁 Saving to folder: {folder_species_name}")
         
-        # Split search strategies (primary = Latin name)
-        search_strategies = search_keywords.split(';')
-        search_strategies = [s.strip() for s in search_strategies if s.strip()]
-        
-        for attempt in range(max_retries + 1):
+        # If no Latin names provided, log and return failed result
+        if not latin_names:
+            logger.warning(f"No Latin name found for {species_name} — skipping")
+            return {
+                'species_indonesia': species_name,
+                'species_english': row.get('species_english', ''),
+                'search_keyword_used': '',
+                'target_images': min_images,
+                'downloaded_images': 0,
+                'success_rate': 0,
+                'status': 'FAILED',
+                'directory': '',
+                'attempt': 0,
+                'error': 'No Latin name'
+            }
+
+        # Try each latin name one-by-one until we reach min_images
+        total_downloaded = 0
+        attempts = 0
+        for latin in latin_names:
+            attempts += 1
+            logger.info(f"🔍 Attempt {attempts}: Searching Latin name '{latin}' for {species_name}")
+
             try:
-                # Use the search strategy for this attempt
-                if attempt < len(search_strategies):
-                    current_search = search_strategies[attempt]
-                else:
-                    current_search = search_strategies[0]  # Fallback to first strategy
-                
-                logger.info(f"🔍 Attempt {attempt + 1}: Using search term '{current_search}'")
-                
-                # Use folder name based on Indonesian name, but search with Latin name
-                scraper = FishImageScraper(folder_species_name, min_images, self.output_base_dir, nama_latin)
-                
-                # Override the search term for this specific scraper instance
-                scraper.current_search_term = current_search
-                
+                # Create scraper that saves under the Indonesian folder name
+                scraper = FishImageScraper(folder_species_name, min_images - total_downloaded, self.output_base_dir, latin)
+                # Ensure the scraper uses the Latin name as the current search term
+                scraper.current_search_term = latin
+
                 downloaded = scraper.run_scraping()
-                
-                result = {
-                    'species_indonesia': species_name,
-                    'species_english': row['species_english'],
-                    'search_keyword_used': current_search,
-                    'target_images': min_images,
-                    'downloaded_images': downloaded,
-                    'success_rate': (downloaded / min_images) * 100,
-                    'status': 'SUCCESS' if downloaded >= min_images else 'PARTIAL',
-                    'directory': scraper.species_dir,
-                    'attempt': attempt + 1
-                }
-                
-                # ✅ Jika berhasil mencapai target, langsung return
-                if downloaded >= min_images:
-                    logger.info(f"✅ SUCCESS! Got {downloaded}/{min_images} images for {species_name}")
-                    return result
-                
-                # ⚠️ Jika belum berhasil dan masih ada attempt, lanjut ke attempt berikutnya
-                if attempt < max_retries:
-                    logger.info(f"⚠️ Got only {downloaded}/{min_images} images, trying next strategy...")
-                else:
-                    # ❌ Sudah max retries, return hasil terbaik yang didapat
-                    logger.warning(f"❌ Max retries reached. Final result: {downloaded}/{min_images} images")
-                    return result
-                        
-            except Exception as e:
-                logger.error(f"Attempt {attempt + 1} failed for {species_name}: {e}")
-                if attempt == max_retries:
+                total_downloaded += downloaded
+
+                # If reached target, return success
+                if total_downloaded >= min_images:
+                    logger.info(f"✅ SUCCESS! Got {total_downloaded}/{min_images} images for {species_name}")
                     return {
                         'species_indonesia': species_name,
-                        'species_english': row['species_english'],
-                        'search_keyword_used': current_search if 'current_search' in locals() else 'unknown',
+                        'species_english': row.get('species_english', ''),
+                        'search_keyword_used': latin,
                         'target_images': min_images,
-                        'downloaded_images': 0,
-                        'success_rate': 0,
-                        'status': 'FAILED',
-                        'directory': '',
-                        'attempt': attempt + 1,
-                        'error': str(e)
+                        'downloaded_images': total_downloaded,
+                        'success_rate': (total_downloaded / min_images) * 100,
+                        'status': 'SUCCESS',
+                        'directory': scraper.species_dir,
+                        'attempt': attempts
                     }
+
+                # If not yet reached, continue to next latin name
+                logger.info(f"⚠️ Collected {total_downloaded}/{min_images} so far for {species_name}; continuing with next Latin name if any")
+
+            except Exception as e:
+                logger.error(f"Attempt searching '{latin}' failed for {species_name}: {e}")
+                # continue to next latin name
+                continue
+
+        # After trying all latin names, return partial result
+        logger.warning(f"⚠️ Only downloaded {total_downloaded}/{min_images} images for {species_name} after trying all Latin names")
+        return {
+            'species_indonesia': species_name,
+            'species_english': row.get('species_english', ''),
+            'search_keyword_used': ';'.join(latin_names),
+            'target_images': min_images,
+            'downloaded_images': total_downloaded,
+            'success_rate': (total_downloaded / min_images) * 100 if min_images else 0,
+            'status': 'PARTIAL' if total_downloaded > 0 else 'FAILED',
+            'directory': os.path.join(self.output_base_dir, folder_species_name),
+            'attempt': attempts
+        }
     
     def run_batch_scraping(self, start_index=0, max_species=None, priority_filter=None):
         """Run batch scraping untuk multiple species"""
